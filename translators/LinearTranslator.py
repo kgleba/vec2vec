@@ -1,7 +1,7 @@
 import torch
 import random
 from torch import nn
-from translators.AbsNTranslator import AbsNTranslator
+from vec2vec.translators.AbsNTranslator import AbsNTranslator
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

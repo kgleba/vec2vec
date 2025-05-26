@@ -8,12 +8,12 @@ from torch.utils.data import DataLoader, TensorDataset
 from huggingface_hub.file_download import hf_hub_download
 from safetensors.torch import load_file
 
-from translators.IdentityBaseline import IdentityBaseline
-from translators.MLPWithResidual import MLPWithResidual
-from translators.LinearTranslator import LinearTranslator
-from translators.TransformTranslator import TransformTranslator
-from translators.transforms.UNetTransform import UNetTransform
-from translators.transforms.UNet1dTransform import UNet1dTransform
+from vec2vec.translators.IdentityBaseline import IdentityBaseline
+from vec2vec.translators.MLPWithResidual import MLPWithResidual
+from vec2vec.translators.LinearTranslator import LinearTranslator
+from vec2vec.translators.TransformTranslator import TransformTranslator
+from vec2vec.translators.transforms.UNetTransform import UNetTransform
+from vec2vec.translators.transforms.UNet1dTransform import UNet1dTransform
 
 from vec2text.models import InversionModel
 

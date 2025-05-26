@@ -1,7 +1,7 @@
 import diffusers
 import torch
 
-from translators.transforms.AbsTransform import AbsTransform
+from vec2vec.translators.transforms.AbsTransform import AbsTransform
 
 
 class UNet1dTransform(AbsTransform):

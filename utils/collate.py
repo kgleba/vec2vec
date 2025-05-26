@@ -9,7 +9,7 @@ import datasets
 import numpy as np
 import torch
 
-from utils.tokenization import get_tokenizer_max_length
+from vec2vec.utils.tokenization import get_tokenizer_max_length
 
 
 class TokenizedCollator:

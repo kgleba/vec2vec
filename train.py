@@ -12,17 +12,17 @@ import numpy as np
 import torch
 from torch.optim.lr_scheduler import LambdaLR
 
-from translators.Discriminator import Discriminator
+from vec2vec.translators.Discriminator import Discriminator
 
 # from eval import eval_model
-from utils.collate import MultiencoderTokenizedDataset, TokenizedCollator
-from utils.eval_utils import EarlyStopper, eval_loop_
-from utils.gan import LeastSquaresGAN, RelativisticGAN, VanillaGAN
-from utils.model_utils import get_sentence_embedding_dimension, load_encoder
-from utils.utils import *
-from utils.streaming_utils import load_streaming_embeddings, process_batch
-from utils.train_utils import rec_loss_fn, trans_loss_fn, vsp_loss_fn, get_grad_norm
-from utils.wandb_logger import Logger
+from vec2vec.utils.collate import MultiencoderTokenizedDataset, TokenizedCollator
+from vec2vec.utils.eval_utils import EarlyStopper, eval_loop_
+from vec2vec.utils.gan import LeastSquaresGAN, RelativisticGAN, VanillaGAN
+from vec2vec.utils.model_utils import get_sentence_embedding_dimension, load_encoder
+from vec2vec.utils.utils import *
+from vec2vec.utils.streaming_utils import load_streaming_embeddings, process_batch
+from vec2vec.utils.train_utils import rec_loss_fn, trans_loss_fn, vsp_loss_fn, get_grad_norm
+from vec2vec.utils.wandb_logger import Logger
 
 from datasets import load_from_disk
 

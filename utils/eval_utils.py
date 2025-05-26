@@ -5,13 +5,13 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
-from utils.streaming_utils import process_batch
+from vec2vec.utils.streaming_utils import process_batch
 from sklearn.metrics import precision_score, recall_score
 
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from utils.tokenization import get_tokenizer_max_length
+from vec2vec.utils.tokenization import get_tokenizer_max_length
 
 
 def text_to_embedding(text, flag, encoder, normalize_embeddings, max_length=32, device='cpu', batch_size=1024):

@@ -2,7 +2,7 @@ from transformers import AutoModelForMaskedLM
 
 import diffusers
 import torch
-from translators.transforms.AbsTransform import AbsTransform
+from vec2vec.translators.transforms.AbsTransform import AbsTransform
 
 
 class UNetTransform(AbsTransform):
