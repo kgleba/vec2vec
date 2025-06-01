@@ -15,7 +15,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from vec2vec.translators.Discriminator import Discriminator
 
 # from eval import eval_model
-from vec2vec.utils.collate import MultiencoderTokenizedDataset, TokenizedCollator
+from vec2vec.utils.collate import MultiencoderTokenizedDataset, TokenizedCollator, identity_collate
 from vec2vec.utils.eval_utils import EarlyStopper, eval_loop_
 from vec2vec.utils.gan import LeastSquaresGAN, RelativisticGAN, VanillaGAN
 from vec2vec.utils.model_utils import get_sentence_embedding_dimension, load_encoder
@@ -26,10 +26,25 @@ from vec2vec.utils.wandb_logger import Logger
 
 from datasets import load_from_disk
 
+def process_custom_batch(batch_indices, encoders, normalize_embeddings, device):
+    results = {}
+
+    for emb_name, encoder in encoders.items():
+        embeddings = encoder.encode(batch_indices)
+
+        if normalize_embeddings:
+            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1).squeeze()
+            # print(f'{embeddings.shape = }')
+
+        results[emb_name] = embeddings.to(device)
+
+    return results
+
 def training_loop_(
     save_dir, accelerator, gan, sup_gan, latent_gan, similarity_gan, translator, sup_dataloader, sup_iter, unsup_dataloader, sup_encs, unsup_enc, cfg, opt, scheduler, logger=None, max_num_batches=None
 ):
     device = accelerator.device
+    import logging
     if logger is None:
         logger = Logger(dummy=True)
 
@@ -62,10 +77,10 @@ def training_loop_(
             print(f"Early stopping at {i} batches")
             break
         with accelerator.accumulate(translator), accelerator.autocast():
-            assert len(set(sup_batch.keys()).intersection(unsup_batch.keys())) == 0
+            # assert len(set(sup_batch.keys()).intersection(unsup_batch.keys())) == 0
             ins = {
-                **process_batch(sup_batch, sup_encs, cfg.normalize_embeddings, device), 
-                **process_batch(unsup_batch, unsup_enc, cfg.normalize_embeddings, device)
+                **process_custom_batch(sup_batch, sup_encs, cfg.normalize_embeddings, device),
+                **process_custom_batch(unsup_batch, unsup_enc, cfg.normalize_embeddings, device)
             }
 
             recons, translations, reps = translator(
@@ -110,7 +125,7 @@ def training_loop_(
                 similarity_disc_acc_real = 0.0
                 similarity_disc_acc_fake = 0.0
                 similarity_gen_acc = 0.0
-            
+
             rec_loss = rec_loss_fn(ins, recons, logger)
             ins_reversed = {
                 cfg.sup_emb: ins[cfg.unsup_emb],
@@ -122,8 +137,8 @@ def training_loop_(
             }
             reverse_rec_loss = rec_loss_fn(ins_reversed, translations_as_recons, logger, prefix="reverse_")
 
-            recons_as_translations = { 
-                in_name: { in_name: val } for in_name, val in recons.items() 
+            recons_as_translations = {
+                in_name: { in_name: val } for in_name, val in recons.items()
             }
             vsp_loss = vsp_loss_fn(ins, recons_as_translations, logger)
             if (cfg.loss_coefficient_cc_rec > 0) or (cfg.loss_coefficient_cc_trans > 0):
@@ -214,6 +229,57 @@ def training_loop_(
     torch.save(accelerator.unwrap_model(translator).state_dict(), model_save_dir)
     return sup_iter
 
+class CustomEmbeddingDataset:
+    def __init__(self, embedding_indices, batch_size, n_embs_per_batch=1, seed=42):
+        self.indices = embedding_indices
+        self.batch_size = batch_size
+        self.n_embs_per_batch = n_embs_per_batch
+        self.seed = seed
+        self._prepare_batches()
+
+    def _prepare_batches(self):
+        np.random.seed(self.seed)
+        shuffled_indices = np.random.permutation(self.indices)
+
+        self.batches = []
+        for i in range(0, len(shuffled_indices), self.batch_size):
+            batch_indices = shuffled_indices[i:i+self.batch_size]
+            if len(batch_indices) == self.batch_size:
+                self.batches.append(batch_indices)
+
+    def __len__(self):
+        return len(self.batches)
+
+    def __getitem__(self, idx):
+        return self.batches[idx]
+
+    def __iter__(self):
+        for batch in self.batches:
+            yield batch
+
+def create_custom_datasets(cfg):
+    total_embeddings = min(gemma_weights.shape[0], llama_weights.shape[0])
+    all_indices = np.arange(total_embeddings)
+
+    np.random.seed(cfg.val_dataset_seed)
+    val_indices = np.random.choice(all_indices, size=cfg.val_size, replace=False)
+    train_indices = np.setdiff1d(all_indices, val_indices)
+
+    np.random.seed(cfg.train_dataset_seed)
+    train_indices = np.random.permutation(train_indices)
+
+    if hasattr(cfg, 'num_points'):
+        sup_indices = train_indices[:cfg.num_points]
+        unsup_indices = train_indices[cfg.num_points:cfg.num_points*2]
+    elif hasattr(cfg, 'unsup_points'):
+        unsup_indices = train_indices[:cfg.unsup_points]
+        sup_indices = train_indices[cfg.unsup_points:]
+
+    supset = CustomEmbeddingDataset(sup_indices, cfg.bs, cfg.n_embs_per_batch, cfg.sampling_seed)
+    unsupset = CustomEmbeddingDataset(unsup_indices, cfg.bs, 1, cfg.sampling_seed)
+    valset = CustomEmbeddingDataset(val_indices, cfg.val_bs if hasattr(cfg, 'val_bs') else cfg.bs, 2, cfg.sampling_seed)
+
+    return supset, unsupset, valset
 
 def main():
     os.environ["TOKENIZERS_PARALLELISM"] = "0"
@@ -232,7 +298,8 @@ def main():
     np.random.seed(cfg.seed)
     torch.cuda.manual_seed(cfg.seed)
 
-    use_val_set = hasattr(cfg, 'val_size')
+    # use_val_set = hasattr(cfg, 'val_size')
+    use_val_set = False
 
     accelerator = accelerate.Accelerator(
         mixed_precision=cfg.mixed_precision if hasattr(cfg, 'mixed_precision') and cfg.mixed_precision != 'no' else None,
@@ -257,11 +324,17 @@ def main():
     print("Running Experiment:", cfg.wandb_name)
 
 
+    # sup_encs = {
+    #     cfg.sup_emb: load_encoder(cfg.sup_emb, mixed_precision=cfg.mixed_precision if hasattr(cfg, 'mixed_precision') else None)
+    # }
+    # encoder_dims = {
+    #     cfg.sup_emb: get_sentence_embedding_dimension(sup_encs[cfg.sup_emb])
+    # }
     sup_encs = {
-        cfg.sup_emb: load_encoder(cfg.sup_emb, mixed_precision=cfg.mixed_precision if hasattr(cfg, 'mixed_precision') else None)
+        cfg.sup_emb: gemma_enc
     }
     encoder_dims = {
-        cfg.sup_emb: get_sentence_embedding_dimension(sup_encs[cfg.sup_emb])
+        cfg.sup_emb: gemma_enc.embedding_dim
     }
     translator = load_n_translator(cfg, encoder_dims)
 
@@ -274,10 +347,10 @@ def main():
     assert cfg.sup_emb != cfg.unsup_emb
 
     unsup_enc = {
-        cfg.unsup_emb: load_encoder(cfg.unsup_emb, mixed_precision=cfg.mixed_precision if hasattr(cfg, 'mixed_precision') else None)
+        cfg.unsup_emb: llama_enc
     }
     unsup_dim = {
-        cfg.unsup_emb: get_sentence_embedding_dimension(unsup_enc[cfg.unsup_emb])
+        cfg.unsup_emb: llama_enc.embedding_dim
     }
     translator.add_encoders(unsup_dim, overwrite_embs=[cfg.unsup_emb])
 
@@ -324,55 +397,33 @@ def main():
         supset = supset.remove_columns([col for col in supset.column_names if col != 'text'])
         unsupset = unsupset.remove_columns([col for col in unsupset.column_names if col != 'text'])
         valset = valset.remove_columns([col for col in valset.column_names if col != 'text'])
-        
 
-    supset = MultiencoderTokenizedDataset(
-        dataset=supset,
-        encoders=sup_encs,
-        n_embs_per_batch=cfg.n_embs_per_batch,
-        batch_size=cfg.bs,
-        max_length=cfg.max_seq_length,
-        seed=cfg.sampling_seed,
-    )
-    unsupset = MultiencoderTokenizedDataset(
-        dataset=unsupset,
-        encoders=unsup_enc,
-        n_embs_per_batch=1,
-        batch_size=cfg.bs,
-        max_length=cfg.max_seq_length,
-        seed=cfg.sampling_seed,
-    )
+
+    supset, unsupset, _ = create_custom_datasets(cfg)
 
     sup_dataloader = DataLoader(
         supset,
-        batch_size=cfg.bs,
+        batch_size=1,
         num_workers=num_workers // 2,
         shuffle=True,
         pin_memory=True,
         prefetch_factor=None,
-        collate_fn=TokenizedCollator(),
+        collate_fn=identity_collate,
         drop_last=True,
     )
     unsup_dataloader = DataLoader(
         unsupset,
-        batch_size=cfg.bs,
+        batch_size=1,
         num_workers=num_workers // 2,
         shuffle=True,
         pin_memory=True,
         prefetch_factor=None,
-        collate_fn=TokenizedCollator(),
+        collate_fn=identity_collate,
         drop_last=True,
     )
 
     if use_val_set:
-        valset = MultiencoderTokenizedDataset(
-            dataset=valset,
-            encoders={ **unsup_enc, **sup_encs },
-            n_embs_per_batch=2,
-            batch_size=cfg.val_bs,
-            max_length=cfg.max_seq_length,
-            seed=cfg.sampling_seed,
-        )
+        _, _, valset = create_custom_datasets(cfg)
         valloader = DataLoader(
             valset,
             batch_size=cfg.val_bs if hasattr(cfg, 'val_bs') else cfg.bs,
@@ -386,7 +437,10 @@ def main():
         valloader = accelerator.prepare(valloader)
 
     opt = torch.optim.Adam(translator.parameters(), lr=cfg.lr, fused=False, betas=(0.5, 0.999))
-    
+
+    print(f'{translator.in_adapters = }')
+    print(f'{translator.out_adapters = }')
+
     ######################################################################################
     disc = Discriminator(
         latent_dim=translator.in_adapters[cfg.unsup_emb].in_dim,
@@ -401,8 +455,8 @@ def main():
     ######################################################################################
     sup_disc = Discriminator(
         latent_dim=translator.in_adapters[cfg.sup_emb].in_dim,
-        discriminator_dim=cfg.disc_dim, 
-        depth=cfg.disc_depth, 
+        discriminator_dim=cfg.disc_dim,
+        depth=cfg.disc_depth,
     )
     sup_disc_opt = torch.optim.Adam(sup_disc.parameters(), lr=cfg.disc_lr, eps=cfg.eps, betas=(0.5, 0.999))
 
@@ -586,7 +640,3 @@ def main():
 
     with open(save_dir + 'config.toml', 'w') as f:
         toml.dump(cfg.__dict__, f)
-
-
-if __name__ == "__main__":
-    main()

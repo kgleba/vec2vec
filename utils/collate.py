@@ -11,6 +11,9 @@ import torch
 
 from vec2vec.utils.tokenization import get_tokenizer_max_length
 
+def identity_collate(batch: List[Any]) -> Any:
+  assert len(batch) == 1
+  return batch[0]
 
 class TokenizedCollator:
     # TODO: Fix to use separate tokenizers

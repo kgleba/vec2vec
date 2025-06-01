@@ -121,6 +121,8 @@ def get_num_proc() -> int:
         return len(os.sched_getaffinity(0)) // world_size  # type: ignore[attr-defined]
     except AttributeError:
         return multiprocessing.cpu_count() // world_size
+    except ZeroDivisionError:
+        return 1
     
 
 def load_translator_from_hf(model_id):

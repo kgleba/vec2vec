@@ -8,11 +8,12 @@ mixed_precision = 'fp16'
 weight_init = 'kaiming'
 dataset = "nq"
 max_seq_length = 64
-unsup_emb = 'gte'
-sup_emb = 'gtr'
+unsup_emb = 'llama'
+sup_emb = 'gemma'
 n_embs_per_batch = 1
 finetune_mode = false
 noise_level = 0.0
+num_points = 20000
 
 [translator]
 style = 'res_mlp'
@@ -32,7 +33,7 @@ disc_dim = 1024
 use_residual = true
 
 [train]
-bs = 256
+bs = 128
 gradient_accumulation_steps = 1
 lr = 2e-5
 no_scheduler = true
@@ -47,7 +48,8 @@ loss_coefficient_r1_penalty = 0.0
 warmup_length = 2000
 patience = 20
 min_delta = 0.0
-min_epochs = 80
+min_epochs = 10
+epochs = 20
 
 
 [gan]
