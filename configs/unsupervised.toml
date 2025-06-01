@@ -48,8 +48,8 @@ loss_coefficient_r1_penalty = 0.0
 warmup_length = 2000
 patience = 20
 min_delta = 0.0
-min_epochs = 10
-epochs = 20
+min_epochs = 7
+epochs = 10
 
 
 [gan]

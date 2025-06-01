@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
-from vec2vec.utils.streaming_utils import process_batch
+from vec2vec.utils.streaming_utils import process_batch, process_custom_batch
 from sklearn.metrics import precision_score, recall_score
 
 import matplotlib.pyplot as plt
@@ -35,7 +35,7 @@ def text_to_embedding(text, flag, encoder, normalize_embeddings, max_length=32, 
     output_embs = []
     for i in range(0, len(text), batch_size):
         batch_slice = {k: v[i:i+batch_size] for k, v in batch.items()}
-        output_embs.append(process_batch(batch_slice, {flag: encoder}, normalize_embeddings, device)[flag])
+        output_embs.append(process_custom_batch(batch_slice, {flag: encoder}, normalize_embeddings, device)[flag])
     return torch.cat(output_embs)
 
     # return process_batch(batch, {flag: encoder}, normalize_embeddings, device)[flag]
@@ -347,7 +347,7 @@ def eval_loop_(
     text_batches = cfg.text_batches if hasattr(cfg, 'text_batches') else 0
     with torch.no_grad():
         for i, batch in enumerate(data_iter):
-            ins = process_batch(batch, encoders, cfg.normalize_embeddings, device)
+            ins = process_custom_batch(batch, encoders, cfg.normalize_embeddings, device)
             recons, translations = translator(ins, include_reps=False)
             
             r_res, t_res = eval_batch(ins, recons, translations)

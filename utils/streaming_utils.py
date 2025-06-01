@@ -145,6 +145,19 @@ def process_batch(batch, encoders, normalize_embeddings, device='cpu'):
     return ins
 
 
+def process_custom_batch(batch_indices, encoders, normalize_embeddings, device):
+    results = {}
+
+    for emb_name, encoder in encoders.items():
+        embeddings = encoder.encode(batch_indices)
+
+        if normalize_embeddings:
+            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1).squeeze()
+
+        results[emb_name] = embeddings.to(device)
+
+    return results
+
 class NanoBeirHFDataLoaderOverride(HFDataLoader):
     def _load_qrels(self, split):
         qrels_ds = load_dataset(

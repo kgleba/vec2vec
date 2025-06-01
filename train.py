@@ -11,6 +11,7 @@ import wandb
 import numpy as np
 import torch
 from torch.optim.lr_scheduler import LambdaLR
+from safetensors import safe_open
 
 from vec2vec.translators.Discriminator import Discriminator
 
@@ -20,25 +21,35 @@ from vec2vec.utils.eval_utils import EarlyStopper, eval_loop_
 from vec2vec.utils.gan import LeastSquaresGAN, RelativisticGAN, VanillaGAN
 from vec2vec.utils.model_utils import get_sentence_embedding_dimension, load_encoder
 from vec2vec.utils.utils import *
-from vec2vec.utils.streaming_utils import load_streaming_embeddings, process_batch
+from vec2vec.utils.streaming_utils import load_streaming_embeddings, process_batch, process_custom_batch
 from vec2vec.utils.train_utils import rec_loss_fn, trans_loss_fn, vsp_loss_fn, get_grad_norm
 from vec2vec.utils.wandb_logger import Logger
 
 from datasets import load_from_disk
 
-def process_custom_batch(batch_indices, encoders, normalize_embeddings, device):
-    results = {}
+gemma_weights = np.load('params.npz')['W_dec']
+with safe_open('final.safetensors', framework='pt') as f:
+  llama_weights = f.get_tensor('decoder.weight').transpose(0, 1)
 
-    for emb_name, encoder in encoders.items():
-        embeddings = encoder.encode(batch_indices)
+  
+class CustomEmbeddingEncoder:
+    def __init__(self, embeddings):
+        self.embeddings = torch.tensor(embeddings) if not isinstance(embeddings, torch.Tensor) else embeddings
+        self.embedding_dim = self.embeddings.shape[-1]
 
-        if normalize_embeddings:
-            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1).squeeze()
-            # print(f'{embeddings.shape = }')
+    def encode(self, indices):
+        return self.embeddings[indices]
 
-        results[emb_name] = embeddings.to(device)
+    def get_sentence_embedding_dimension(self):
+        return self.embedding_dim
 
-    return results
+
+gemma_enc = CustomEmbeddingEncoder(gemma_weights)
+llama_enc = CustomEmbeddingEncoder(llama_weights)
+
+assert gemma_enc.embedding_dim == 2304
+assert llama_enc.embedding_dim == 4096
+
 
 def training_loop_(
     save_dir, accelerator, gan, sup_gan, latent_gan, similarity_gan, translator, sup_dataloader, sup_iter, unsup_dataloader, sup_encs, unsup_enc, cfg, opt, scheduler, logger=None, max_num_batches=None
@@ -298,8 +309,8 @@ def main():
     np.random.seed(cfg.seed)
     torch.cuda.manual_seed(cfg.seed)
 
-    # use_val_set = hasattr(cfg, 'val_size')
-    use_val_set = False
+    use_val_set = hasattr(cfg, 'val_size')
+    # use_val_set = False
 
     accelerator = accelerate.Accelerator(
         mixed_precision=cfg.mixed_precision if hasattr(cfg, 'mixed_precision') and cfg.mixed_precision != 'no' else None,
@@ -431,7 +442,7 @@ def main():
             shuffle=False,
             pin_memory=True,
             prefetch_factor=(8 if num_workers > 0 else None),
-            collate_fn=TokenizedCollator(),
+            collate_fn=identity_collate,
             drop_last=True,
         )
         valloader = accelerator.prepare(valloader)
