@@ -13,27 +13,27 @@ sup_emb = 'gemma'
 n_embs_per_batch = 1
 finetune_mode = false
 noise_level = 0.0
-num_points = 20000
+num_points = 120000
 
 [translator]
 style = 'res_mlp'
 norm_style = 'batch'
 depth = 3
 transform_depth = 4
-d_adapter = 1024
-d_hidden = 1024
-d_transform = 1024
+d_adapter = 5120
+d_hidden = 5120
+d_transform = 5120
 use_small_output_adapters = false
 use_residual_adapters = true
 
 [discriminator]
 gan_style = "least_squares"
 disc_depth = 5
-disc_dim = 1024
+disc_dim = 2048
 use_residual = true
 
 [train]
-bs = 128
+bs = 512
 gradient_accumulation_steps = 1
 lr = 2e-5
 no_scheduler = true
@@ -48,8 +48,8 @@ loss_coefficient_r1_penalty = 0.0
 warmup_length = 2000
 patience = 20
 min_delta = 0.0
-min_epochs = 7
-epochs = 10
+min_epochs = 200
+epochs = 500
 
 
 [gan]
@@ -62,9 +62,9 @@ loss_coefficient_latent_gen = 1.0
 loss_coefficient_similarity_gen = 0.0
 
 [eval]
-val_size = 4096
-val_bs = 1024
-top_k_size = 1024
+val_size = 10000
+val_bs = 64
+top_k_size = 64
 top_k_batches = 4
 k = 16
 heatmap_size = 64

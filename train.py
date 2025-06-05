@@ -3,13 +3,16 @@ import random
 import toml
 from sys import argv
 from types import SimpleNamespace
+from pathlib import Path
 
 import accelerate
 from tqdm import tqdm
 import wandb
 
+import dotenv
 import numpy as np
 import torch
+import faiss
 from torch.optim.lr_scheduler import LambdaLR
 from safetensors import safe_open
 
@@ -27,10 +30,29 @@ from vec2vec.utils.wandb_logger import Logger
 
 from datasets import load_from_disk
 
+# torch.cuda.set_per_process_memory_fraction(0.5)
+
 gemma_weights = np.load('params.npz')['W_dec']
 with safe_open('final.safetensors', framework='pt') as f:
   llama_weights = f.get_tensor('decoder.weight').transpose(0, 1)
 
+dotenv.load_dotenv()
+wandb.login(key=os.getenv('WANDB_API_KEY'), force=True)
+
+llama_weights_norm = llama_weights / torch.norm(llama_weights, dim=1, keepdim=True)
+llama_weights_norm = llama_weights_norm.to(torch.float32).detach().cpu().numpy()
+llama_quantizer = faiss.IndexFlatIP(llama_weights.shape[1])
+llama_index = faiss.IndexIVFFlat(llama_quantizer, llama_weights.shape[1], int(llama_weights.shape[0] ** 0.5), 
+                                 faiss.METRIC_INNER_PRODUCT)
+llama_index.train(llama_weights_norm)
+llama_index.add(llama_weights_norm)
+
+gemma_weights_norm = gemma_weights / np.linalg.norm(gemma_weights, axis=1, keepdims=True)
+gemma_quantizer = faiss.IndexFlatIP(gemma_weights_norm.shape[1])
+gemma_index = faiss.IndexIVFFlat(gemma_quantizer, gemma_weights.shape[1], int(gemma_weights.shape[0] ** 0.5),
+                                 faiss.METRIC_INNER_PRODUCT)
+gemma_index.train(gemma_weights_norm)
+gemma_index.add(gemma_weights_norm)
   
 class CustomEmbeddingEncoder:
     def __init__(self, embeddings):
@@ -47,12 +69,12 @@ class CustomEmbeddingEncoder:
 gemma_enc = CustomEmbeddingEncoder(gemma_weights)
 llama_enc = CustomEmbeddingEncoder(llama_weights)
 
-assert gemma_enc.embedding_dim == 2304
+assert gemma_enc.embedding_dim == 3584
 assert llama_enc.embedding_dim == 4096
 
 
 def training_loop_(
-    save_dir, accelerator, gan, sup_gan, latent_gan, similarity_gan, translator, sup_dataloader, sup_iter, unsup_dataloader, sup_encs, unsup_enc, cfg, opt, scheduler, logger=None, max_num_batches=None
+    save_dir, accelerator, gan, sup_gan, latent_gan, similarity_gan, translator, sup_dataloader, sup_iter, unsup_dataloader, sup_encs, unsup_enc, cfg, opt, scheduler, logger=None, max_num_batches=None, epoch: int | None = None
 ):
     device = accelerator.device
     import logging
@@ -97,6 +119,23 @@ def training_loop_(
             recons, translations, reps = translator(
                 ins, noise_level=cfg.noise_level, include_reps=True
             )
+            
+            # assess translation quality (cosine similarity search in the other vector space)
+            llama_translated = translations['llama']['gemma']
+            llama_translated_norm = llama_translated / torch.norm(llama_translated, dim=1, keepdim=True)
+            llama_translated_norm = llama_translated_norm.detach().cpu()
+            
+            llama_sim, _ = llama_index.search(llama_translated_norm, 100)
+            llama_avg_cos_sim = np.mean(llama_sim)
+            llama_max_cos_sim = np.max(llama_sim)
+            
+            gemma_translated = translations['gemma']['llama']
+            gemma_translated_norm = gemma_translated / torch.norm(gemma_translated, dim=1, keepdim=True)
+            gemma_translated_norm = gemma_translated_norm.detach().cpu()
+            
+            gemma_sim, _ = gemma_index.search(gemma_translated_norm, 100)
+            gemma_avg_cos_sim = np.mean(gemma_sim)
+            gemma_max_cos_sim = np.max(gemma_sim)
 
             # discriminator
             disc_r1_penalty, disc_loss, gen_loss, disc_acc_real, disc_acc_fake, gen_acc = gan.step(
@@ -228,6 +267,10 @@ def training_loop_(
                 "similarity_disc_acc_real": similarity_disc_acc_real,
                 "similarity_disc_acc_fake": similarity_disc_acc_fake,
                 "similarity_gen_acc": similarity_gen_acc,
+                "gemma2llama_avg_cos_sim_train": llama_avg_cos_sim,
+                "gemma2llama_max_cos_sim_train": llama_max_cos_sim,
+                "llama2gemma_avg_cos_sim_train": gemma_avg_cos_sim,
+                "llama2gemma_max_cos_sim_train": gemma_max_cos_sim
             }
 
             for metric, value in metrics.items():
@@ -237,7 +280,8 @@ def training_loop_(
 
     with open(save_dir + 'config.toml', 'w') as f:
         toml.dump(cfg.__dict__, f)
-    torch.save(accelerator.unwrap_model(translator).state_dict(), model_save_dir)
+    if (epoch + 1) % 25 == 0:
+        torch.save(accelerator.unwrap_model(translator).state_dict(), Path(save_dir) / f'epoch_{epoch}.pt')
     return sup_iter
 
 class CustomEmbeddingDataset:
@@ -281,7 +325,7 @@ def create_custom_datasets(cfg):
 
     if hasattr(cfg, 'num_points'):
         sup_indices = train_indices[:cfg.num_points]
-        unsup_indices = train_indices[cfg.num_points:cfg.num_points*2]
+        unsup_indices = train_indices[:cfg.num_points]
     elif hasattr(cfg, 'unsup_points'):
         unsup_indices = train_indices[:cfg.unsup_points]
         sup_indices = train_indices[cfg.unsup_points:]
@@ -292,9 +336,9 @@ def create_custom_datasets(cfg):
 
     return supset, unsupset, valset
 
-def main():
+def main(experiment: str = 'unsupervised'):
     os.environ["TOKENIZERS_PARALLELISM"] = "0"
-    cfg = toml.load(f'configs/{argv[1]}.toml')
+    cfg = toml.load(f'configs/{experiment}.toml')
     unknown_cfg = read_args(argv)
     cfg = SimpleNamespace(**{**{k: v for d in cfg.values() for k, v in d.items()}, **unknown_cfg})
 
@@ -309,8 +353,8 @@ def main():
     np.random.seed(cfg.seed)
     torch.cuda.manual_seed(cfg.seed)
 
-    use_val_set = hasattr(cfg, 'val_size')
-    # use_val_set = False
+    # use_val_set = hasattr(cfg, 'val_size')
+    use_val_set = False
 
     accelerator = accelerate.Accelerator(
         mixed_precision=cfg.mixed_precision if hasattr(cfg, 'mixed_precision') and cfg.mixed_precision != 'no' else None,
@@ -382,32 +426,32 @@ def main():
     )
 
     num_workers = min(get_num_proc(), 8)
-    if cfg.dataset != 'mimic':
-        dset = load_streaming_embeddings(cfg.dataset)
-        print(f"Using {num_workers} workers and {len(dset)} datapoints")
-
-        dset_dict = dset.train_test_split(test_size=cfg.val_size, seed=cfg.val_dataset_seed)
-        dset = dset_dict["train"]
-        valset = dset_dict["test"]
-
-        assert hasattr(cfg, 'num_points') or hasattr(cfg, 'unsup_points')
-        dset = dset.shuffle(seed=cfg.train_dataset_seed)
-        if hasattr(cfg, 'num_points'):
-            assert cfg.num_points > 0 and cfg.num_points <= len(dset) // 2
-            supset = dset.select(range(cfg.num_points))
-            unsupset = dset.select(range(cfg.num_points, cfg.num_points * 2))
-        elif hasattr(cfg, 'unsup_points'):
-            unsupset = dset.select(range(min(cfg.unsup_points, len(dset))))
-            supset = dset.select(range(min(cfg.unsup_points, len(dset)), len(dset) - len(unsupset)))
-    else:
-        supset = load_from_disk('data/mimic')['supervised'].shuffle(cfg.train_dataset_seed).select(range(cfg.num_points))
-        unsupset = load_from_disk('data/mimic')['unsupervised'].shuffle(cfg.train_dataset_seed).select(range(cfg.num_points))
-        valset = load_from_disk('data/mimic')['evaluation'].shuffle(cfg.val_dataset_seed).select(range(cfg.val_size))
-
-        # for each, drop all columns but 'text' using remove_columns
-        supset = supset.remove_columns([col for col in supset.column_names if col != 'text'])
-        unsupset = unsupset.remove_columns([col for col in unsupset.column_names if col != 'text'])
-        valset = valset.remove_columns([col for col in valset.column_names if col != 'text'])
+    # if cfg.dataset != 'mimic':
+    #     dset = load_streaming_embeddings(cfg.dataset)
+    #     print(f"Using {num_workers} workers and {len(dset)} datapoints")
+# 
+    #     dset_dict = dset.train_test_split(test_size=cfg.val_size, seed=cfg.val_dataset_seed)
+    #     dset = dset_dict["train"]
+    #     valset = dset_dict["test"]
+# 
+    #     assert hasattr(cfg, 'num_points') or hasattr(cfg, 'unsup_points')
+    #     dset = dset.shuffle(seed=cfg.train_dataset_seed)
+    #     if hasattr(cfg, 'num_points'):
+    #         assert cfg.num_points > 0 and cfg.num_points <= len(dset) // 2
+    #         supset = dset.select(range(cfg.num_points))
+    #         unsupset = dset.select(range(cfg.num_points, cfg.num_points * 2))
+    #     elif hasattr(cfg, 'unsup_points'):
+    #         unsupset = dset.select(range(min(cfg.unsup_points, len(dset))))
+    #         supset = dset.select(range(min(cfg.unsup_points, len(dset)), len(dset) - len(unsupset)))
+    # else:
+    #    supset = load_from_disk('data/mimic')['supervised'].shuffle(cfg.train_dataset_seed).select(range(cfg.num_points))
+    #    unsupset = load_from_disk('data/mimic')['unsupervised'].shuffle(cfg.train_dataset_seed).select(range(cfg.num_points))
+    #    valset = load_from_disk('data/mimic')['evaluation'].shuffle(cfg.val_dataset_seed).select(range(cfg.val_size))
+#
+    #    # for each, drop all columns but 'text' using remove_columns
+    #    supset = supset.remove_columns([col for col in supset.column_names if col != 'text'])
+    #    unsupset = unsupset.remove_columns([col for col in unsupset.column_names if col != 'text'])
+    #    valset = valset.remove_columns([col for col in valset.column_names if col != 'text'])
 
 
     supset, unsupset, _ = create_custom_datasets(cfg)
@@ -432,9 +476,9 @@ def main():
         collate_fn=identity_collate,
         drop_last=True,
     )
-
+    
+    _, _, valset = create_custom_datasets(cfg)
     if use_val_set:
-        _, _, valset = create_custom_datasets(cfg)
         valloader = DataLoader(
             valset,
             batch_size=cfg.val_bs if hasattr(cfg, 'val_bs') else cfg.bs,
@@ -646,8 +690,15 @@ def main():
             opt=opt,
             scheduler=scheduler,
             logger=logger,
-            max_num_batches=max_num_batches
+            max_num_batches=max_num_batches,
+            epoch=epoch
         )
 
     with open(save_dir + 'config.toml', 'w') as f:
         toml.dump(cfg.__dict__, f)
+
+if __name__ == '__main__':
+    os.chdir('vec2vec')
+    
+    main()
+

@@ -99,9 +99,11 @@ def eval_batch(ins, recons, translations):
     for target_flag, emb in ins.items():
         emb = emb / emb.norm(dim=1, keepdim=True)
         in_distances = 1 - (emb @ emb.T)
+        
         rec = recons[target_flag]
         rec = rec / rec.norm(dim=1, keepdim=True)
         rec_distances = 1 - (rec @ rec.T)
+        
         recon_res[target_flag] = {
             "mse": F.mse_loss(emb, rec).item(),
             "cos": F.cosine_similarity(emb, rec).mean().item(),
@@ -110,10 +112,12 @@ def eval_batch(ins, recons, translations):
             "cos_var": F.cosine_similarity(emb, rec).var().item(),
             "vsp_var": (in_distances - rec_distances).abs().var().item()
         }
+        
         translation_res[target_flag] = {}
         for flag, trans in translations[target_flag].items():
             trans = trans / trans.norm(dim=1, keepdim=True)
             out_distances = 1 - (trans @ trans.T)
+            
             translation_res[target_flag][flag] = {
                 "mse": F.mse_loss(emb, trans).item(),
                 "cos": F.cosine_similarity(emb, trans).mean().item(),
@@ -122,6 +126,12 @@ def eval_batch(ins, recons, translations):
                 "cos_var": F.cosine_similarity(emb, trans).var().item(),
                 "vsp_var": (in_distances - out_distances).abs().var().item()
             }
+            
+            del trans, out_distances
+            
+        del emb, in_distances, rec, rec_distances
+    
+    torch.cuda.empty_cache()    
     return recon_res, translation_res
 
 
