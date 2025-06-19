@@ -32,28 +32,26 @@ from datasets import load_from_disk
 
 # torch.cuda.set_per_process_memory_fraction(0.5)
 
-gemma_weights = np.load('params.npz')['W_dec']
-with safe_open('final.safetensors', framework='pt') as f:
-  llama_weights = f.get_tensor('decoder.weight').transpose(0, 1)
+gemma_it_weights = np.load('gemma-9b-it_params.npz')['W_dec']
+gemma_pt_weights = np.load('gemma-9b-pt_params.npz')['W_dec']
 
 dotenv.load_dotenv()
 wandb.login(key=os.getenv('WANDB_API_KEY'), force=True)
 
-llama_weights_norm = llama_weights / torch.norm(llama_weights, dim=1, keepdim=True)
-llama_weights_norm = llama_weights_norm.to(torch.float32).detach().cpu().numpy()
-llama_quantizer = faiss.IndexFlatIP(llama_weights.shape[1])
-llama_index = faiss.IndexIVFFlat(llama_quantizer, llama_weights.shape[1], int(llama_weights.shape[0] ** 0.5), 
+gemma_it_weights_norm = gemma_it_weights / np.linalg.norm(gemma_it_weights, axis=1, keepdims=True)
+gemma_it_quantizer = faiss.IndexFlatIP(gemma_it_weights_norm.shape[1])
+gemma_it_index = faiss.IndexIVFFlat(gemma_it_quantizer, gemma_it_weights.shape[1], int(gemma_it_weights.shape[0] ** 0.5),
                                  faiss.METRIC_INNER_PRODUCT)
-llama_index.train(llama_weights_norm)
-llama_index.add(llama_weights_norm)
+gemma_it_index.train(gemma_it_weights_norm)
+gemma_it_index.add(gemma_it_weights_norm)
 
-gemma_weights_norm = gemma_weights / np.linalg.norm(gemma_weights, axis=1, keepdims=True)
-gemma_quantizer = faiss.IndexFlatIP(gemma_weights_norm.shape[1])
-gemma_index = faiss.IndexIVFFlat(gemma_quantizer, gemma_weights.shape[1], int(gemma_weights.shape[0] ** 0.5),
+gemma_pt_weights_norm = gemma_pt_weights / np.linalg.norm(gemma_pt_weights, axis=1, keepdims=True)
+gemma_pt_quantizer = faiss.IndexFlatIP(gemma_pt_weights_norm.shape[1])
+gemma_pt_index = faiss.IndexIVFFlat(gemma_pt_quantizer, gemma_pt_weights.shape[1], int(gemma_pt_weights.shape[0] ** 0.5),
                                  faiss.METRIC_INNER_PRODUCT)
-gemma_index.train(gemma_weights_norm)
-gemma_index.add(gemma_weights_norm)
-  
+gemma_pt_index.train(gemma_pt_weights_norm)
+gemma_pt_index.add(gemma_pt_weights_norm)
+
 class CustomEmbeddingEncoder:
     def __init__(self, embeddings):
         self.embeddings = torch.tensor(embeddings) if not isinstance(embeddings, torch.Tensor) else embeddings
@@ -66,11 +64,11 @@ class CustomEmbeddingEncoder:
         return self.embedding_dim
 
 
-gemma_enc = CustomEmbeddingEncoder(gemma_weights)
-llama_enc = CustomEmbeddingEncoder(llama_weights)
+gemma_it_enc = CustomEmbeddingEncoder(gemma_it_weights)
+gemma_pt_enc = CustomEmbeddingEncoder(gemma_pt_weights)
 
-assert gemma_enc.embedding_dim == 3584
-assert llama_enc.embedding_dim == 4096
+assert gemma_it_enc.embedding_dim == 3584
+assert gemma_pt_enc.embedding_dim == 3584
 
 
 def training_loop_(
@@ -121,21 +119,21 @@ def training_loop_(
             )
             
             # assess translation quality (cosine similarity search in the other vector space)
-            llama_translated = translations['llama']['gemma']
-            llama_translated_norm = llama_translated / torch.norm(llama_translated, dim=1, keepdim=True)
-            llama_translated_norm = llama_translated_norm.detach().cpu()
-            
-            llama_sim, _ = llama_index.search(llama_translated_norm, 100)
-            llama_avg_cos_sim = np.mean(llama_sim)
-            llama_max_cos_sim = np.max(llama_sim)
-            
-            gemma_translated = translations['gemma']['llama']
-            gemma_translated_norm = gemma_translated / torch.norm(gemma_translated, dim=1, keepdim=True)
-            gemma_translated_norm = gemma_translated_norm.detach().cpu()
-            
-            gemma_sim, _ = gemma_index.search(gemma_translated_norm, 100)
-            gemma_avg_cos_sim = np.mean(gemma_sim)
-            gemma_max_cos_sim = np.max(gemma_sim)
+            gemma_pt_translated = translations['gemma_pt']['gemma_it']
+            gemma_pt_translated_norm = gemma_pt_translated / torch.norm(gemma_pt_translated, dim=1, keepdim=True)
+            gemma_pt_translated_norm = gemma_pt_translated_norm.detach().cpu()
+
+            gemma_pt_sim, _ = gemma_pt_index.search(gemma_pt_translated_norm, 100)
+            gemma_pt_avg_cos_sim = np.mean(gemma_pt_sim)
+            gemma_pt_max_cos_sim = np.max(gemma_pt_sim)
+
+            gemma_it_translated = translations['gemma_it']['gemma_pt']
+            gemma_it_translated_norm = gemma_it_translated / torch.norm(gemma_it_translated, dim=1, keepdim=True)
+            gemma_it_translated_norm = gemma_it_translated_norm.detach().cpu()
+
+            gemma_it_sim, _ = gemma_it_index.search(gemma_it_translated_norm, 100)
+            gemma_it_avg_cos_sim = np.mean(gemma_it_sim)
+            gemma_it_max_cos_sim = np.max(gemma_it_sim)
 
             # discriminator
             disc_r1_penalty, disc_loss, gen_loss, disc_acc_real, disc_acc_fake, gen_acc = gan.step(
@@ -267,10 +265,10 @@ def training_loop_(
                 "similarity_disc_acc_real": similarity_disc_acc_real,
                 "similarity_disc_acc_fake": similarity_disc_acc_fake,
                 "similarity_gen_acc": similarity_gen_acc,
-                "gemma2llama_avg_cos_sim_train": llama_avg_cos_sim,
-                "gemma2llama_max_cos_sim_train": llama_max_cos_sim,
-                "llama2gemma_avg_cos_sim_train": gemma_avg_cos_sim,
-                "llama2gemma_max_cos_sim_train": gemma_max_cos_sim
+                "it2pt_avg_cos_sim_train": gemma_pt_avg_cos_sim,
+                "it2pt_max_cos_sim_train": gemma_pt_max_cos_sim,
+                "pt2it_avg_cos_sim_train": gemma_it_avg_cos_sim,
+                "pt2it_max_cos_sim_train": gemma_it_max_cos_sim
             }
 
             for metric, value in metrics.items():
@@ -313,7 +311,7 @@ class CustomEmbeddingDataset:
             yield batch
 
 def create_custom_datasets(cfg):
-    total_embeddings = min(gemma_weights.shape[0], llama_weights.shape[0])
+    total_embeddings = min(gemma_it_weights.shape[0], gemma_pt_weights.shape[0])
     all_indices = np.arange(total_embeddings)
 
     np.random.seed(cfg.val_dataset_seed)
@@ -386,10 +384,10 @@ def main(experiment: str = 'unsupervised'):
     #     cfg.sup_emb: get_sentence_embedding_dimension(sup_encs[cfg.sup_emb])
     # }
     sup_encs = {
-        cfg.sup_emb: gemma_enc
+        cfg.sup_emb: gemma_pt_enc
     }
     encoder_dims = {
-        cfg.sup_emb: gemma_enc.embedding_dim
+        cfg.sup_emb: gemma_pt_enc.embedding_dim
     }
     translator = load_n_translator(cfg, encoder_dims)
 
@@ -402,10 +400,10 @@ def main(experiment: str = 'unsupervised'):
     assert cfg.sup_emb != cfg.unsup_emb
 
     unsup_enc = {
-        cfg.unsup_emb: llama_enc
+        cfg.unsup_emb: gemma_it_enc
     }
     unsup_dim = {
-        cfg.unsup_emb: llama_enc.embedding_dim
+        cfg.unsup_emb: gemma_it_enc.embedding_dim
     }
     translator.add_encoders(unsup_dim, overwrite_embs=[cfg.unsup_emb])
 
@@ -698,7 +696,5 @@ def main(experiment: str = 'unsupervised'):
         toml.dump(cfg.__dict__, f)
 
 if __name__ == '__main__':
-    os.chdir('vec2vec')
-    
     main()
 
