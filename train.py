@@ -696,5 +696,7 @@ def main(experiment: str = 'unsupervised'):
         toml.dump(cfg.__dict__, f)
 
 if __name__ == '__main__':
+    os.chdir('vec2vec')
+    
     main()
 
