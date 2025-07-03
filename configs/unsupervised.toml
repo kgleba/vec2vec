@@ -33,7 +33,7 @@ disc_dim = 2048
 use_residual = true
 
 [train]
-bs = 512
+bs = 1024
 gradient_accumulation_steps = 1
 lr = 2e-5
 no_scheduler = true
@@ -53,7 +53,7 @@ epochs = 500
 
 
 [gan]
-disc_lr = 1e-5
+disc_lr = 6e-6
 eps = 6.25e-10
 smooth = 0.9
 loss_coefficient_disc = 1.0

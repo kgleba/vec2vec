@@ -30,8 +30,6 @@ from vec2vec.utils.wandb_logger import Logger
 
 from datasets import load_from_disk
 
-# torch.cuda.set_per_process_memory_fraction(0.5)
-
 gemma_it_weights = np.load('gemma-9b-it_params.npz')['W_dec']
 gemma_pt_weights = np.load('gemma-9b-pt_params.npz')['W_dec']
 
@@ -126,6 +124,7 @@ def training_loop_(
             gemma_pt_sim, _ = gemma_pt_index.search(gemma_pt_translated_norm, 100)
             gemma_pt_avg_cos_sim = np.mean(gemma_pt_sim)
             gemma_pt_max_cos_sim = np.max(gemma_pt_sim)
+            gemma_pt_avg_relevant_cos_sim = np.mean(gemma_pt_sim[gemma_pt_sim > 0.5])
 
             gemma_it_translated = translations['gemma_it']['gemma_pt']
             gemma_it_translated_norm = gemma_it_translated / torch.norm(gemma_it_translated, dim=1, keepdim=True)
@@ -134,6 +133,7 @@ def training_loop_(
             gemma_it_sim, _ = gemma_it_index.search(gemma_it_translated_norm, 100)
             gemma_it_avg_cos_sim = np.mean(gemma_it_sim)
             gemma_it_max_cos_sim = np.max(gemma_it_sim)
+            gemma_it_avg_relevant_cos_sim = np.mean(gemma_it_sim[gemma_it_sim > 0.5])
 
             # discriminator
             disc_r1_penalty, disc_loss, gen_loss, disc_acc_real, disc_acc_fake, gen_acc = gan.step(
@@ -268,7 +268,9 @@ def training_loop_(
                 "it2pt_avg_cos_sim_train": gemma_pt_avg_cos_sim,
                 "it2pt_max_cos_sim_train": gemma_pt_max_cos_sim,
                 "pt2it_avg_cos_sim_train": gemma_it_avg_cos_sim,
-                "pt2it_max_cos_sim_train": gemma_it_max_cos_sim
+                "pt2it_max_cos_sim_train": gemma_it_max_cos_sim,
+                "it2pt_avg_relevant_cos_sim_train": gemma_pt_avg_relevant_cos_sim,
+                "pt2it_avg_relevant_cos_sim_train": gemma_it_avg_relevant_cos_sim
             }
 
             for metric, value in metrics.items():
@@ -566,6 +568,12 @@ def main(experiment: str = 'unsupervised'):
         print(f"Loading models from {cfg.load_dir}...")
         translator.load_state_dict(torch.load(cfg.load_dir + 'model.pt', map_location='cpu'), strict=False)
         disc.load_state_dict(torch.load(cfg.load_dir + 'disc.pt', map_location='cpu'))
+        
+    translator = torch.nn.SyncBatchNorm.convert_sync_batchnorm(translator)
+    disc = torch.nn.SyncBatchNorm.convert_sync_batchnorm(disc)
+    sup_disc = torch.nn.SyncBatchNorm.convert_sync_batchnorm(sup_disc)
+    latent_disc = torch.nn.SyncBatchNorm.convert_sync_batchnorm(latent_disc)
+    similarity_disc = torch.nn.SyncBatchNorm.convert_sync_batchnorm(similarity_disc)
 
     translator, opt, scheduler = accelerator.prepare(translator, opt, scheduler)
     disc, disc_opt, disc_scheduler = accelerator.prepare(disc, disc_opt, disc_scheduler)
