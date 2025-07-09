@@ -36,12 +36,15 @@ gemma_pt_weights = np.load('gemma-9b-pt_params.npz')['W_dec']
 dotenv.load_dotenv()
 wandb.login(key=os.getenv('WANDB_API_KEY'), force=True)
 
+res = faiss.StandardGpuResources()
+
 gemma_it_weights_norm = gemma_it_weights / np.linalg.norm(gemma_it_weights, axis=1, keepdims=True)
 gemma_it_quantizer = faiss.IndexFlatIP(gemma_it_weights_norm.shape[1])
 gemma_it_index = faiss.IndexIVFFlat(gemma_it_quantizer, gemma_it_weights.shape[1], int(gemma_it_weights.shape[0] ** 0.5),
                                  faiss.METRIC_INNER_PRODUCT)
 gemma_it_index.train(gemma_it_weights_norm)
 gemma_it_index.add(gemma_it_weights_norm)
+gemma_it_index = faiss.index_cpu_to_gpu(res, 0, gemma_it_index)
 
 gemma_pt_weights_norm = gemma_pt_weights / np.linalg.norm(gemma_pt_weights, axis=1, keepdims=True)
 gemma_pt_quantizer = faiss.IndexFlatIP(gemma_pt_weights_norm.shape[1])
@@ -49,6 +52,7 @@ gemma_pt_index = faiss.IndexIVFFlat(gemma_pt_quantizer, gemma_pt_weights.shape[1
                                  faiss.METRIC_INNER_PRODUCT)
 gemma_pt_index.train(gemma_pt_weights_norm)
 gemma_pt_index.add(gemma_pt_weights_norm)
+gemma_pt_index = faiss.index_cpu_to_gpu(res, 0, gemma_pt_index)
 
 class CustomEmbeddingEncoder:
     def __init__(self, embeddings):
@@ -280,8 +284,8 @@ def training_loop_(
 
     with open(save_dir + 'config.toml', 'w') as f:
         toml.dump(cfg.__dict__, f)
-    if (epoch + 1) % 25 == 0:
-        torch.save(accelerator.unwrap_model(translator).state_dict(), Path(save_dir) / f'epoch_{epoch}.pt')
+    if (epoch + 1) % 50 == 0:
+        accelerator.save_state(save_dir)
     return sup_iter
 
 class CustomEmbeddingDataset:
@@ -369,6 +373,10 @@ def main(experiment: str = 'unsupervised'):
         cfg.wandb_name = ','.join([f"{k[0]}:{v}" for k, v in unknown_cfg.items()]) if unknown_cfg else cfg.wandb_name
         save_dir = cfg.save_dir.format(cfg.latent_dims if hasattr(cfg, 'latent_dims') else cfg.wandb_name)
 
+    start_epoch = int(os.getenv('START_EPOCH', 0))
+    if start_epoch != 0:
+        accelerator.load_state(save_dir)
+    
     logger = Logger(
         project=cfg.wandb_project,
         name=cfg.wandb_name,
@@ -569,11 +577,11 @@ def main(experiment: str = 'unsupervised'):
         translator.load_state_dict(torch.load(cfg.load_dir + 'model.pt', map_location='cpu'), strict=False)
         disc.load_state_dict(torch.load(cfg.load_dir + 'disc.pt', map_location='cpu'))
         
-    translator = torch.nn.SyncBatchNorm.convert_sync_batchnorm(translator)
-    disc = torch.nn.SyncBatchNorm.convert_sync_batchnorm(disc)
-    sup_disc = torch.nn.SyncBatchNorm.convert_sync_batchnorm(sup_disc)
-    latent_disc = torch.nn.SyncBatchNorm.convert_sync_batchnorm(latent_disc)
-    similarity_disc = torch.nn.SyncBatchNorm.convert_sync_batchnorm(similarity_disc)
+    # translator = torch.nn.SyncBatchNorm.convert_sync_batchnorm(translator)
+    # disc = torch.nn.SyncBatchNorm.convert_sync_batchnorm(disc)
+    # sup_disc = torch.nn.SyncBatchNorm.convert_sync_batchnorm(sup_disc)
+    # latent_disc = torch.nn.SyncBatchNorm.convert_sync_batchnorm(latent_disc)
+    # similarity_disc = torch.nn.SyncBatchNorm.convert_sync_batchnorm(similarity_disc)
 
     translator, opt, scheduler = accelerator.prepare(translator, opt, scheduler)
     disc, disc_opt, disc_scheduler = accelerator.prepare(disc, disc_opt, disc_scheduler)
@@ -636,7 +644,7 @@ def main(experiment: str = 'unsupervised'):
     else:
         early_stopping = False
 
-    for epoch in range(max_num_epochs):
+    for epoch in range(start_epoch, max_num_epochs):
         if use_val_set:
             with torch.no_grad(), accelerator.autocast():
                 translator.eval()

@@ -49,11 +49,11 @@ warmup_length = 2000
 patience = 20
 min_delta = 0.0
 min_epochs = 200
-epochs = 500
+epochs = 3000
 
 
 [gan]
-disc_lr = 6e-6
+disc_lr = 1e-5
 eps = 6.25e-10
 smooth = 0.9
 loss_coefficient_disc = 1.0
